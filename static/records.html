@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Record Explorer · Universal Log Pre-processing Framework</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="console explorer-console">
+
+        <header class="titlebar">
+            <div class="brand">
+                <span class="brand-mark">▮</span>
+                <span class="brand-name">Record Explorer</span>
+            </div>
+            <div class="titlebar-right">
+                <button id="download-run" class="btn btn-ghost" title="Download every record in this run as JSON lines">
+                    <span class="btn-key">↓</span>jsonl
+                </button>
+                <a class="btn btn-nav" href="/" id="back-to-console"><span class="btn-key">←</span>console</a>
+            </div>
+        </header>
+
+        <div class="telemetry" id="run-meta">
+            <div class="tcell"><span class="tlabel">records</span><span class="tvalue" id="meta-total">—</span></div>
+            <div class="tsep"></div>
+            <div class="tcell"><span class="tlabel">cached</span><span class="tvalue" id="meta-cached">—</span></div>
+            <div class="tsep"></div>
+            <div class="tcell"><span class="tlabel">discovery</span><span class="tvalue" id="meta-discovery">—</span></div>
+            <div class="tsep"></div>
+            <div class="tcell"><span class="tlabel">captured</span><span class="tvalue" id="meta-at">—</span></div>
+        </div>
+
+        <div class="explorer-toolbar">
+            <input id="search" class="search-input" type="search" autocomplete="off" spellcheck="false"
+                   placeholder="search message, raw line or field values…   ( / )">
+            <div class="chip-row" id="mode-filters" role="group" aria-label="Filter by processing mode"></div>
+        </div>
+
+        <main class="explorer-main">
+            <section class="pane pane-list">
+                <div class="pane-head">
+                    <h2 class="pane-title">records</h2>
+                    <div class="pane-tools">
+                        <span class="pane-hint" id="page-hint">—</span>
+                    </div>
+                </div>
+                <div id="rec-list" class="rec-list" tabindex="0" role="listbox" aria-label="Parsed records"></div>
+            </section>
+
+            <section class="pane pane-detail">
+                <div class="pane-head">
+                    <h2 class="pane-title">record detail</h2>
+                </div>
+                <div id="detail" class="detail"></div>
+            </section>
+        </main>
+    </div>
+
+    <script src="/static/common.js"></script>
+    <script src="/static/records.js"></script>
+</body>
+</html>
