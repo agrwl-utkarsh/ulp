@@ -207,7 +207,7 @@ class DiscoveryEngine:
         trunc=log_entry[:500]
         url="https://api.anthropic.com/v1/messages"
         payload={"model":model,"max_tokens":256,"system":SYSTEM_PROMPT,"messages":[{"role":"user","content":trunc}]}
-        resp, err=_http_post(url, {"x-api-key":api_key,"anthropic-version":"2023-06-01","Content-Type":"application/json"}, payload)
+        resp, err=_http_post(url, {"x-api-key":api_key,"anthropic-version":"2023-06-01","Content-Type":"application/json"}, payload, timeout=8.0)
         if err: return None, f"Anthropic {err}"
         if resp.status_code!=200:
             msg=resp.text[:200]
@@ -238,7 +238,7 @@ class DiscoveryEngine:
         url="https://api.groq.com/openai/v1/chat/completions"
         payload={"model":model,"temperature":0,"max_tokens":GROQ_MAX_TOKENS,"messages":[{"role":"system","content":SYSTEM_PROMPT},{"role":"user","content":trunc}]}
         if _is_groq_reasoning(model): payload["reasoning_effort"]="low"
-        resp, err=_http_post(url, {"Authorization": f"Bearer {api_key}","Content-Type":"application/json"}, payload)
+        resp, err=_http_post(url, {"Authorization": f"Bearer {api_key}","Content-Type":"application/json"}, payload, timeout=8.0)
         if err: return None, f"Groq {err}"
         if resp.status_code!=200:
             msg=resp.text[:200]; fg=""

@@ -9,7 +9,7 @@ for k in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GROQ_API_KEY", "ANTHROPIC_API_KEY
 
 import pandas as pd
 
-import main as server
+from main import get_pipeline, process_record
 from pipeline.gate import FormatGate
 from pipeline.mining import mask_line
 from train_gate import GENS, UNKNOWN, make_corpus
@@ -27,12 +27,13 @@ def main() -> int:
         print("ERROR: models/gate.pkl missing - run python train_gate.py first")
         return 1
 
+    _, _, _, template_tier = get_pipeline()
     random.seed(args.seed)
-    server.template_tier.reset()
+    template_tier.reset()
 
     X, y = make_corpus(args.n_per_family, GENS)
     t0 = time.perf_counter()
-    results = [server.process_record(l) for l in X]
+    results = [process_record(l) for l in X]
     server_s = time.perf_counter() - t0
     t0 = time.perf_counter()
     gate_rows = [gate_clf.inspect(mask_line(l)) for l in X]
@@ -58,10 +59,11 @@ def main() -> int:
     ).round(4)
     out = summary.join(modes).fillna(0).astype({"lines": int})
 
-    server.template_tier.reset()
-    server.parser.cache.clear()
+    template_tier.reset()
+    _, parser, _, _ = get_pipeline()
+    parser.cache.clear()
     Xu, yu = make_corpus(args.unknown_per_family, UNKNOWN)
-    res_u = [server.process_record(l) for l in Xu]
+    res_u = [process_record(l) for l in Xu]
     gate_rows_u = [gate_clf.inspect(mask_line(l)) for l in Xu]
     du = pd.DataFrame({
         "family": yu,
@@ -76,7 +78,7 @@ def main() -> int:
     prec = (du["gate_novel"].sum() / (du["gate_novel"].sum() + df["gate_novel"].sum())) \
         if (du["gate_novel"].sum() + df["gate_novel"].sum()) else float("nan")
 
-    tier_stats = dict(server.template_tier.stats)
+    tier_stats = dict(template_tier.stats)
     mode_share = (df["mode"].value_counts(normalize=True) * 100).round(2)
     tier = gate_clf.info
 

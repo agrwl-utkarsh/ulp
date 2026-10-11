@@ -12,6 +12,9 @@ from pipeline.norm import Normalizer
 from pipeline.mining import TemplateMinerTier
 from pipeline.gate import GATE
 
+if not os.environ.get("INGEST_API_KEY"):
+    logging.warning("INGEST_API_KEY not set: ingest endpoint is open to unauthenticated requests")
+
 app = FastAPI(title="Format-Agnostic Two-Tier Log Pipeline (SIH26)")
 static_dir = Path(__file__).parent / "static"
 if static_dir.exists():
@@ -29,6 +32,10 @@ discovery_engine = DiscoveryEngine()
 parser = UniversalParser()
 normalizer = Normalizer()
 template_tier = TemplateMinerTier()
+
+def get_pipeline():
+    """Return pipeline objects for external scripts (avoids module-level side effects)."""
+    return discovery_engine, parser, normalizer, template_tier
 
 def _require_ingest_key(request: Request):
     exp = os.environ.get("INGEST_API_KEY")
@@ -81,13 +88,17 @@ def buffer_lines(lines: List[str]) -> List[str]:
     if not lines: return []
     buf, cur, depth, in_str, in_tb = [], [], 0, False, False
     for line in lines:
-        if not line.strip(): continue
+        stripped = line.strip()
+        if not stripped:
+            if cur:
+                cur.append(line)
+            continue
         cont = False
         if cur:
             if depth>0: cont=True
             elif line.startswith((' ','\t')): cont=True
             elif line.startswith(('Caused by:','... ')): cont=True
-            elif line.strip().startswith('at ') and ('(' in line or '.' in line): cont=True
+            elif stripped.startswith('at ') and ('(' in line or '.' in line): cont=True
             elif in_tb and EXC_RE.match(line):
                 cont=True; in_tb=False
         if cont and len(cur)<500:
@@ -145,7 +156,7 @@ def process_record(log: str) -> dict:
                     rule=discovery_engine.run_inference(log, feat)
                     parser.store_rule(feat, rule)
                     if is_known: parser.store_family_rule(fam, rule)
-                    if tier.get("template"):
+                    if tier.get("template") and tier.get("cluster_id") is not None:
                         template_tier.learn_rule(tier["template"], rule, tier["cluster_id"])
 
         parsed=parser.parse_with_rule(log, rule)

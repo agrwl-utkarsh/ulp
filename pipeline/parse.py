@@ -1,5 +1,6 @@
 import json, re, threading, csv, io
 from .time_util import parse_timestamp
+from .norm import SEV_NUM
 
 def strip_ansi(s: str) -> str:
     return re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', s)
@@ -139,38 +140,42 @@ class UniversalParser:
         return {"is_json": is_json, "tok_count": tok, "pipe_count": pc, "comma_count": cc, "eq_count": eq, "bracket_count": br, "delim": delim, "fmt_type": fmt, "family": self.detect_family(log_entry)}
 
     def find_cached_rule(self, feat):
+        with self.family_lock:
+            fam = feat.get("family")
+            family_rule = self.family_cache.get(fam) if fam else None
+        if family_rule:
+            return f"family:{fam}", family_rule
+
         with self.cache_lock:
             if not self.cache and self._parsed_fps:
                 self._parsed_fps.clear()
-            fam = feat.get("family")
-            if fam:
-                with self.family_lock:
-                    fr = self.family_cache.get(fam)
-                    if fr:
-                        return f"family:{fam}", fr
-            for fp_str, rule in self.cache.items():
-                cf = self._parsed_fps.get(fp_str)
-                if cf is None:
-                    try:
-                        cf = json.loads(fp_str)
-                    except Exception:
-                        continue
+            items = list(self.cache.items())
+            fps_snapshot = dict(self._parsed_fps)
+
+        for fp_str, rule in items:
+            cf = fps_snapshot.get(fp_str)
+            if cf is None:
+                try:
+                    cf = json.loads(fp_str)
+                except Exception:
+                    continue
+                with self.cache_lock:
                     self._parsed_fps[fp_str] = cf
-                if cf.get("is_json") != feat.get("is_json"):
-                    continue
-                if feat.get("is_json"):
-                    if rule.get("method") == "json":
-                        return fp_str, rule
-                    continue
-                if "family" in cf and "family" in feat:
-                    if cf["family"] == feat["family"]:
-                        return fp_str, rule
-                    continue
-                if cf.get("fmt_type") and feat.get("fmt_type") and cf["fmt_type"] == feat["fmt_type"]:
-                    if feat.get("delim") is None or cf.get("delim") == feat.get("delim"):
-                        return fp_str, rule
-                if cf.get("delim") and feat.get("delim") and cf["delim"] == feat["delim"]:
+            if cf.get("is_json") != feat.get("is_json"):
+                continue
+            if feat.get("is_json"):
+                if rule.get("method") == "json":
                     return fp_str, rule
+                continue
+            if "family" in cf and "family" in feat:
+                if cf["family"] == feat["family"]:
+                    return fp_str, rule
+                continue
+            if cf.get("fmt_type") and feat.get("fmt_type") and cf["fmt_type"] == feat["fmt_type"]:
+                if feat.get("delim") is None or cf.get("delim") == feat.get("delim"):
+                    return fp_str, rule
+            if cf.get("delim") and feat.get("delim") and cf["delim"] == feat["delim"]:
+                return fp_str, rule
         return None, None
 
     def detect_timestamp(self, line):
@@ -221,7 +226,7 @@ class UniversalParser:
         m = re.match(r'^<(\d{1,3})>(\d+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)(?:\s+(.*))?$', s)
         if not m: return None
         pri, ver, ts, host, app, pid, mid, rest = m.groups()
-        sev = {0:"CRITICAL",1:"CRITICAL",2:"CRITICAL",3:"ERROR",4:"WARNING",5:"INFO",6:"INFO",7:"DEBUG"}.get(int(pri)&7,"UNKNOWN")
+        sev = SEV_NUM.get(int(pri)&7, "UNKNOWN").upper()
         pf, ex = {"severity": sev}, {"facility": int(pri)>>3, "syslog_version": int(ver)}
         iso = parse_timestamp(ts)
         if iso: pf["timestamp"]=iso
@@ -350,7 +355,6 @@ class UniversalParser:
         return _mk_res(pf, ex)
 
     def _parse_logfmt(self, s):
-        if '(' in s or '[' in s: return None
         pat=re.compile(r'([a-zA-Z0-9_.-]+)=(?:\"([^\"]*)\"|\'([^\']*)\'|([^ \t\n\r,;\]\}>\\)&]+))')
         matches=pat.findall(s)
         if len(matches)<3 or sum(len(m[0])+1+len(m[1] or m[2] or m[3]) for m in matches) < len(s)*0.45:
@@ -376,44 +380,48 @@ class UniversalParser:
             ex[k]=val
         return _mk_res(pf, ex)
 
-    def parse_compositional(self, log_entry):
-        rem=strip_ansi(log_entry).strip()
+    def _try_ncsa(self, rem: str):
         m=re.match(r'^(\S+)\s+(\S+)\s+(\S+)\s+\[([\w:/]+\s+[+\-]\d{4})\]\s+"([^"]+)"\s+(\d{3})\s+(\S+)(?:\s+"([^"]*)"\s+"([^"]*)")?', rem)
-        if m:
-            ip, _, user, raw_ts, req, status, size, ref, agent=m.groups()
-            pf={"source":ip,"message":req,"event_type":"http_request"}
-            ex={}
-            iso=parse_timestamp(raw_ts)
-            if iso: pf["timestamp"]=iso
-            try:
-                sc=int(status)
-                ex["http_status"]=sc
-                pf["severity"]="ERROR" if sc>=500 else "WARNING" if sc>=400 else "INFO"
-            except ValueError:
-                pass
-            if user!="-": ex["user"]=user
-            if size!="-": ex["bytes_sent"]=int(size) if size.isdigit() else size
-            if ref and ref!="-": ex["referer"]=ref
-            if agent and agent!="-": ex["user_agent"]=agent
-            toks=req.split()
-            if len(toks)>=2:
-                ex["http_method"]=toks[0]
-                ex["http_path"]=toks[1]
-                if len(toks)>=3: ex["http_proto"]=toks[2]
-            return _mk_res(pf, ex)
+        if not m: return None
+        ip, _, user, raw_ts, req, status, size, ref, agent=m.groups()
+        pf={"source":ip,"message":req,"event_type":"http_request"}
+        ex={}
+        iso=parse_timestamp(raw_ts)
+        if iso: pf["timestamp"]=iso
+        try:
+            sc=int(status)
+            ex["http_status"]=sc
+            pf["severity"]="ERROR" if sc>=500 else "WARNING" if sc>=400 else "INFO"
+        except ValueError:
+            pass
+        if user!="-": ex["user"]=user
+        if size!="-": ex["bytes_sent"]=int(size) if size.isdigit() else size
+        if ref and ref!="-": ex["referer"]=ref
+        if agent and agent!="-": ex["user_agent"]=agent
+        toks=req.split()
+        if len(toks)>=2:
+            ex["http_method"]=toks[0]
+            ex["http_path"]=toks[1]
+            if len(toks)>=3: ex["http_proto"]=toks[2]
+        return _mk_res(pf, ex)
 
+    def _try_known_formats(self, rem: str):
         for fn in [self._parse_cef,self._parse_leef,self._parse_rfc5424,self._parse_cri,self._parse_nginx_error,self._parse_spring_boot,self._parse_java_log,self._parse_python_log,self._parse_postgres,self._parse_logfmt]:
             r=fn(rem)
             if r: return r
+        return None
 
+    def _parse_syslog_priority(self, rem: str):
         pf, ex = {}, {}
         mm=re.search(r'^<(\d{1,3})>', rem)
         if mm:
             rem=rem[len(mm.group(0)):].lstrip(' -:,|')
             v=int(mm.group(1))
-            pf["severity"]={0:"CRITICAL",1:"CRITICAL",2:"CRITICAL",3:"ERROR",4:"WARNING",5:"INFO",6:"INFO",7:"DEBUG"}.get(v&7,"UNKNOWN")
+            pf["severity"]=SEV_NUM.get(v&7, "UNKNOWN").upper()
             ex["facility"]=v>>3
+        return pf, ex, rem
 
+    def _parse_timestamp_and_severity(self, rem: str, pf: dict, ex: dict):
         ts_iso, was_sys, rem = self.detect_timestamp(rem)
         if ts_iso: pf["timestamp"]=ts_iso
         if "severity" not in pf:
@@ -421,7 +429,9 @@ class UniversalParser:
             if mm and mm.start()==0:
                 rem=rem[len(mm.group(0)):].lstrip(' -:,|')
                 pf["severity"]=mm.group(1).upper()
+        return pf, ex, rem, ts_iso, was_sys
 
+    def _parse_syslog_source(self, rem: str, pf: dict, ex: dict, ts_iso, was_sys):
         if ts_iso and was_sys:
             hm=re.match(r'^([a-zA-Z0-9_-]+)\s+([a-zA-Z0-9_.-]+)(?:\[(\d+)\])?:\s*', rem)
             if hm:
@@ -429,7 +439,9 @@ class UniversalParser:
                 ex["program"]=hm.group(2)
                 if hm.group(3): ex["pid"]=hm.group(3)
                 rem=rem[len(hm.group(0)):]
+        return pf, ex, rem
 
+    def _parse_context_and_severity(self, rem: str, pf: dict, ex: dict):
         mm=re.search(r'^\[([^\]]+)\]|^\(([^)]+)\)', rem)
         if mm:
             rem=rem[len(mm.group(0)):].lstrip(' -:,|')
@@ -439,7 +451,9 @@ class UniversalParser:
                 if sm and sm.start()==0:
                     rem=rem[len(sm.group(0)):].lstrip(' -:,|')
                     pf["severity"]=sm.group(1).upper()
+        return pf, ex, rem
 
+    def _parse_json_payload(self, rem: str, ex: dict):
         mj=re.search(r'(\{.*\}|\[.*\])\s*$', rem)
         if mj:
             try:
@@ -449,9 +463,9 @@ class UniversalParser:
                     rem=rem[:mj.start()].rstrip(' -:,|')
             except Exception:
                 pass
+        return rem, ex
 
-        if rem: pf["message"]=rem.strip()
-
+    def _extract_entities(self, log_entry: str, pf: dict, ex: dict):
         ip=re.search(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', log_entry)
         if ip:
             ex["ip"]=ip.group(0)
@@ -463,11 +477,30 @@ class UniversalParser:
             uv=um.group(1)
             if uv.lower() not in ("invalid","authentication","to","the","a","an"):
                 ex["user"]=uv
-
         for k, v in re.findall(r'([a-zA-Z0-9_-]+)=("(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|[^ \t\n\r,;\]\}>\\)&]+)', log_entry):
             if v.startswith('"') and v.endswith('"'): v = v[1:-1]
             elif v.startswith("'") and v.endswith("'"): v = v[1:-1]
             ex.setdefault(k, v)
+        return pf, ex
+
+    def parse_compositional(self, log_entry):
+        rem=strip_ansi(log_entry).strip()
+
+        r = self._try_ncsa(rem)
+        if r: return r
+
+        r = self._try_known_formats(rem)
+        if r: return r
+
+        pf, ex, rem = self._parse_syslog_priority(rem)
+        pf, ex, rem, ts_iso, was_sys = self._parse_timestamp_and_severity(rem, pf, ex)
+        pf, ex, rem = self._parse_syslog_source(rem, pf, ex, ts_iso, was_sys)
+        pf, ex, rem = self._parse_context_and_severity(rem, pf, ex)
+        rem, ex = self._parse_json_payload(rem, ex)
+
+        if rem: pf["message"]=rem.strip()
+
+        pf, ex = self._extract_entities(log_entry, pf, ex)
 
         return _mk_res(pf, ex)
 

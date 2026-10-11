@@ -17,20 +17,22 @@ except ImportError:
 MAX_QUARANTINE = 500
 KV_TTL = 60*60*24*7
 
-_MASKING = [
-    (r"\d{4}[-/]\d{2}[-/]\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+\-]\d{2}:?\d{2})?", "TS"),
-    (r"[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}", "TS"),
-    (r"\d{2}/[A-Za-z]{3}/\d{4}(?::\d{2}:\d{2}:\d{2})?", "TS"),
-    (r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", "IP"),
-    (r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b", "UUID"),
-    (r"\b[0-9a-fA-F]{16,}\b", "HEX"),
-    (r"\b\d+\.\d+\b", "NUM"),
-    (r"\b\d+\b", "NUM"),
+_MASKING_PATTERNS = [
+    (re.compile(r"\d{4}[-/]\d{2}[-/]\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+\-]\d{2}:?\d{2})?"), "TS"),
+    (re.compile(r"[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}"), "TS"),
+    (re.compile(r"\d{2}/[A-Za-z]{3}/\d{4}(?::\d{2}:\d{2}:\d{2})?"), "TS"),
+    (re.compile(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b"), "IP"),
+    (re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"), "UUID"),
+    (re.compile(r"\b[0-9a-fA-F]{16,}\b"), "HEX"),
+    (re.compile(r"\b\d+\.\d+\b"), "NUM"),
+    (re.compile(r"\b\d+\b"), "NUM"),
 ]
 
+_MASKING = [(pat.pattern, mk) for pat, mk in _MASKING_PATTERNS]
+
 def mask_line(line: str) -> str:
-    for pat, mk in _MASKING:
-        line = re.sub(pat, mk, line)
+    for pat, mk in _MASKING_PATTERNS:
+        line = pat.sub(mk, line)
     return line
 
 def build_miner(sim_th=0.5):
@@ -64,6 +66,7 @@ class TemplateMinerTier:
         self.stats = {"mined":0,"template_rule_hits":0,"novel_templates":0,"graduated_now":0,"kv_backed_rules":0,"escalated":0}
         self._kv_url = os.environ.get("UPSTASH_REDIS_REST_URL","").rstrip("/")
         self._kv_token = os.environ.get("UPSTASH_REDIS_REST_TOKEN","")
+        self._kv_session = requests.Session() if (self._kv_url and self._kv_token) else None
 
     def rule_backend(self) -> str:
         return "upstash" if (self._kv_url and self._kv_token) else "in-memory"
@@ -74,8 +77,10 @@ class TemplateMinerTier:
         return r["template_mined"], r["cluster_id"]
 
     def _kv_req(self, method, url, **kw):
+        if not self._kv_session:
+            return None
         try:
-            fn = requests.get if method=="GET" else requests.post
+            fn = self._kv_session.get if method=="GET" else self._kv_session.post
             hdr = {"Authorization": f"Bearer {self._kv_token}"}
             resp = fn(url, headers=hdr, timeout=2, **kw)
             return resp
@@ -125,18 +130,26 @@ class TemplateMinerTier:
             e["samples"].append(sample[:300])
         self._quarantine.move_to_end(tmpl)
         if len(self._quarantine)>MAX_QUARANTINE:
-            self._quarantine.popitem(last=False)
+            evicted_tmpl, _ = self._quarantine.popitem(last=False)
+            self._kv_seen.discard(evicted_tmpl)
+            for cid, rule in list(self._rules.items()):
+                if rule.get("template") == evicted_tmpl:
+                    del self._rules[cid]
+                    break
         return e
 
     def decide(self, line: str, gate) -> dict:
+        base = {"kind": None, "template": None, "cluster_id": None, "rule": None, "gate": {}, "quarantine_count": 0, "occurrences": 0, "graduate_after": self.graduate_after, "graduate_now": False}
         if self.disabled:
-            return {"kind":"discover","template":None,"cluster_id":None,"gate":{}}
+            base["kind"] = "discover"
+            return base
         tmpl, cid = self.mine(line)
         self.stats["mined"]+=1
         rule = self.lookup_rule(cid, tmpl)
         if rule is not None:
             self.stats["template_rule_hits"]+=1
-            return {"kind":"rule","template":tmpl,"cluster_id":cid,"rule":rule,"gate":{}}
+            base.update({"kind":"rule","template":tmpl,"cluster_id":cid,"rule":rule})
+            return base
 
         gate_info = gate.inspect(mask_line(line)) if gate else {}
         entry = self._record(tmpl, line, gate_info)
@@ -161,19 +174,22 @@ class TemplateMinerTier:
                 grad_now = True
                 self.stats["graduated_now"]+=1
 
-        return {"kind":kind,"template":tmpl,"cluster_id":cid,"gate":gate_info,"quarantine_count":entry["count"],"occurrences":occ,"graduate_after":self.graduate_after,"graduate_now":grad_now}
+        base.update({"kind":kind,"template":tmpl,"cluster_id":cid,"gate":gate_info,"quarantine_count":entry["count"],"occurrences":occ,"graduate_now":grad_now})
+        return base
 
     def templates_view(self):
-        clusters=[]
-        if not self.disabled:
-            for c in self._miner.drain.id_to_cluster.values():
-                clusters.append({"cluster_id":c.cluster_id,"template":" ".join(map(str,c.log_template_tokens)),"size":c.size,"has_rule":c.cluster_id in self._rules})
-        clusters.sort(key=lambda c:c["size"], reverse=True)
-        return {"drain3_available":DRAIN3_AVAILABLE,"enforce_mode":self.enforce,"rule_backend":self.rule_backend(),"clusters":len(clusters),"rules_learned":len(self._rules),"stats":dict(self.stats),"templates":clusters[:100]}
+        with self._lock:
+            clusters=[]
+            if not self.disabled:
+                for c in self._miner.drain.id_to_cluster.values():
+                    clusters.append({"cluster_id":c.cluster_id,"template":" ".join(map(str,c.log_template_tokens)),"size":c.size,"has_rule":c.cluster_id in self._rules})
+            clusters.sort(key=lambda c:c["size"], reverse=True)
+            return {"drain3_available":DRAIN3_AVAILABLE,"enforce_mode":self.enforce,"rule_backend":self.rule_backend(),"clusters":len(clusters),"rules_learned":len(self._rules),"stats":dict(self.stats),"templates":clusters[:100]}
 
     def quarantine_view(self):
-        items=sorted(self._quarantine.values(), key=lambda e:e["count"], reverse=True)
-        return {"enforce_mode":self.enforce,"novel_templates":len(items),"items":[dict(e,samples=e["samples"][:3]) for e in items[:100]]}
+        with self._lock:
+            items=sorted(self._quarantine.values(), key=lambda e:e["count"], reverse=True)
+            return {"enforce_mode":self.enforce,"novel_templates":len(items),"items":[dict(e,samples=e["samples"][:3]) for e in items[:100]]}
 
     def reset(self) -> dict:
         with self._lock:
