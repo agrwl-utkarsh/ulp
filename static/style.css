@@ -27,6 +27,33 @@
     --gutter-w: 3.25rem;
 }
 
+[data-theme="light"] {
+    --bg: #f7f8fa;
+    --bg-2: #eef0f4;
+    --surface: #ffffff;
+    --surface-2: #f3f4f7;
+    --surface-3: #e8eaef;
+
+    --line: #d0d5dd;
+    --line-2: #b3bac8;
+
+    --text: #24292e;
+    --text-2: #57606a;
+    --text-3: #8b949e;
+
+    --accent: #2b78c4;
+    --ok: #1a7f37;
+    --info: #0969da;
+    --warn: #9a6700;
+    --err: #cf222e;
+}
+
+[data-theme="light"] body::before {
+    background-image:
+        linear-gradient(to right, rgba(0, 0, 0, 0.022) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(0, 0, 0, 0.022) 1px, transparent 1px);
+}
+
 
 *, *::before, *::after { box-sizing: border-box; }
 

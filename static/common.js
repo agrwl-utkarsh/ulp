@@ -6,6 +6,29 @@ window.ULP = (() => {
 
 
 
+  const THEME_KEY = 'ulp.theme.v1';
+  const initTheme = () => {
+    const saved = localStorage.getItem(THEME_KEY);
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const theme = saved || (prefersDark ? 'dark' : 'light');
+    document.documentElement.setAttribute('data-theme', theme);
+    return theme;
+  };
+
+  const toggleTheme = () => {
+    const current = document.documentElement.getAttribute('data-theme') || 'dark';
+    const next = current === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem(THEME_KEY, next);
+    updateThemeIcon(next);
+    return next;
+  };
+
+  const updateThemeIcon = (theme) => {
+    const icon = document.getElementById('theme-icon');
+    if (icon) icon.textContent = theme === 'dark' ? '☀' : '☾';
+  };
+
   const esc = (v) => String(v ?? '')
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -181,9 +204,15 @@ window.ULP = (() => {
   const latestRun = () => readRuns()[0] || null;
   const clearRuns = () => { try { safeStorage?.removeItem(STORE_KEY); } catch {} };
 
+  initTheme();
+  const toggleBtn = document.getElementById('theme-toggle');
+  if (toggleBtn) toggleBtn.addEventListener('click', toggleTheme);
+  updateThemeIcon(document.documentElement.getAttribute('data-theme') || 'dark');
+
   return {
     esc, escText, clip, num, highlightJSON,
     MODE_CLASS, MODES, modeClass, recordNotes, gateRows, fieldsOf,
-    Store: { saveRun, listRuns, getRun, getRuns: readRuns, latestRun, clearRuns, available: !!safeStorage }
+    Store: { saveRun, listRuns, getRun, getRuns: readRuns, latestRun, clearRuns, available: !!safeStorage },
+    Theme: { init: initTheme, toggle: toggleTheme, current: () => document.documentElement.getAttribute('data-theme') || 'dark' }
   };
 })();
